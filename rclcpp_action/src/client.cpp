@@ -330,8 +330,6 @@ ClientBase::add_to_wait_set(rcl_wait_set_t * wait_set)
 bool
 ClientBase::is_ready(rcl_wait_set_t * wait_set)
 {
-
-
   bool is_feedback_ready{false};
   bool is_status_ready{false};
   bool is_goal_response_ready{false};
