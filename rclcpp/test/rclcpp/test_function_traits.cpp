@@ -99,6 +99,22 @@ struct ObjectMember
     (void)b;
     return 9;
   }
+
+  struct SomeHandle
+  {
+    int i;
+  };
+  struct SomeMsg
+  {
+    int i;
+  };
+
+  void callback_int_class_shared_ptr(
+    const int & /*channelId*/,
+    SomeHandle /*clientHandle*/,
+    std::shared_ptr<SomeMsg>/*msg*/)
+  {
+  }
 };
 
 template<
@@ -441,6 +457,19 @@ TEST(TestFunctionTraits, argument_types) {
         decltype(bind_one_bool_one_float)
       >::template argument_type<0>
     >::value, "Functor accepts a bool as first argument");
+
+  auto bind_int_class_shr_ptr = std::bind(
+    &ObjectMember::callback_int_class_shared_ptr, &object_member, 5, ObjectMember::SomeHandle(),
+    std::placeholders::_1);
+  (void)bind_int_class_shr_ptr;  // to quiet clang
+
+  static_assert(
+    std::is_same<
+      std::shared_ptr<ObjectMember::SomeMsg>,
+      rclcpp::function_traits::function_traits<
+        decltype(bind_int_class_shr_ptr)
+      >::template argument_type<0>
+    >::value, "Functor accepts a std::shared_ptr<ObjectMember::SomeMsg> as first argument");
 
   static_assert(
     std::is_same<
