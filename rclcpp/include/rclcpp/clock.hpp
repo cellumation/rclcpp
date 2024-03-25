@@ -113,13 +113,6 @@ public:
     Time until,
     Context::SharedPtr context = contexts::get_global_default_context());
 
-  bool
-  sleep_until(
-    Time until,
-    std::condition_variable &cv,
-    bool ignore_wakeups,
-    Context::SharedPtr context = contexts::get_global_default_context());
-
   /**
    * Sleep for a specified Duration.
    *
@@ -199,6 +192,11 @@ public:
   RCLCPP_PUBLIC
   bool
   ros_time_is_active();
+
+  RCLCPP_PUBLIC
+  void
+  cancel_sleep_or_wait();
+
 
   /// Return the rcl_clock_t clock handle
   RCLCPP_PUBLIC

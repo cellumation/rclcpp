@@ -36,11 +36,13 @@ public:
     {
         running = false;
 
-        while(!thread_terminated.load())
-        {
-            thread_conditional.notify_one();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        used_clock_for_timers.cancel_sleep_or_wait();
+
+//         while(!thread_terminated.load())
+//         {
+//             thread_conditional.notify_one();
+//             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+//         }
 
         trigger_thread.join();
     }
@@ -69,7 +71,8 @@ public:
             all_timers.erase(it);
         }
 
-        thread_conditional.notify_all();
+        used_clock_for_timers.cancel_sleep_or_wait();
+//         thread_conditional.notify_all();
     }
 
     void add_timer ( const rclcpp::TimerBase::SharedPtr &timer, const std::function<void()> &timer_ready_callback)
@@ -112,7 +115,8 @@ public:
 //         RCUTILS_LOG_ERROR_NAMED("rclcpp", "TimerQueue::waking clock");
 
         //wake up thread as new timer was added
-        thread_conditional.notify_all();
+        used_clock_for_timers.cancel_sleep_or_wait();
+//         thread_conditional.notify_all();
     };
 
     void add_timer_to_running_map(const TimerData *timer_data)
@@ -241,7 +245,7 @@ public:
             }
             try {
 //             RCUTILS_LOG_ERROR_NAMED("rclcpp", "TimerQueue::timer_thread before sleep, next wakeup time %+" PRId64 , next_wakeup_time.count());
-                used_clock_for_timers.sleep_until(rclcpp::Time(next_wakeup_time.count(), timer_type), thread_conditional, false);
+                used_clock_for_timers.sleep_until(rclcpp::Time(next_wakeup_time.count(), timer_type));
             }
             catch(const std::runtime_error &)
             {
@@ -266,7 +270,8 @@ public:
         running = false;
         while(!thread_terminated.load())
         {
-            thread_conditional.notify_one();
+            used_clock_for_timers.cancel_sleep_or_wait();
+//             thread_conditional.notify_one();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
