@@ -584,15 +584,9 @@ Executor::execute_any_executable(
   }
 
   if (any_exec.timer) {
-    TRACETOOLS_TRACEPOINT(
-      rclcpp_executor_execute,
-      static_cast<const void *>(any_exec.timer->get_timer_handle().get()));
-    execute_guarded([&any_exec]() {execute_timer(any_exec.timer);}, exception_handler);
+    execute_guarded([&any_exec]() {execute_timer(any_exec.timer, any_exec.data);}, exception_handler);
   }
   if (any_exec.subscription) {
-    TRACETOOLS_TRACEPOINT(
-      rclcpp_executor_execute,
-      static_cast<const void *>(any_exec.subscription->get_subscription_handle().get()));
     execute_guarded(
       [&any_exec]() {
         execute_subscription(any_exec.subscription);

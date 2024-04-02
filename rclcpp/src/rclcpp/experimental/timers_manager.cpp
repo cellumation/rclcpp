@@ -232,7 +232,7 @@ void TimersManager::execute_ready_timers_unsafe(
       } else {
         if (exception_handler) {
           try {
-            head_timer->execute_callback();
+            head_timer->execute_callback(data);
           } catch (const std::exception & e) {
             RCLCPP_ERROR_STREAM(
               rclcpp::get_logger("rclcpp"),
@@ -241,7 +241,7 @@ void TimersManager::execute_ready_timers_unsafe(
             exception_handler(e);
           }
         } else {
-          head_timer->execute_callback();
+          head_timer->execute_callback(data);
         }
       }
     } else {
