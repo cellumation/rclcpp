@@ -117,17 +117,16 @@ TEST(TestCallbackGroup, InvalidCbg)
   executor.collect();
   EXPECT_EQ(1u, executor.collected_timers());
 
+  executor.wait();
+
   cbg.reset();
-  node.reset();
-  timer.reset();
 
   // Since the callback group has been reset, this should not be allowed to
   // be a valid executable (timer and cbg should both be nullptr).
   // In the regression, timer == next_executable.timer whil
   // next_executable.callback_group == nullptr, which was incorrect.
-  executor.wait();
   auto next_executable = executor.next();
-  EXPECT_NE(nullptr, next_executable.timer);
+  EXPECT_EQ(nullptr, next_executable.timer);
   EXPECT_EQ(nullptr, next_executable.callback_group);
 
   EXPECT_EQ(nullptr, next_executable.client);
