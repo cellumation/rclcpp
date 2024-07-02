@@ -455,6 +455,7 @@ protected:
   void
   execute_any_executable(AnyExecutable & any_exec);
 
+public:
   /// Run subscription executable.
   /**
    * Do necessary setup and tear-down as well as executing the subscription.
@@ -492,6 +493,7 @@ protected:
   static void
   execute_client(rclcpp::ClientBase::SharedPtr client);
 
+protected:
   /// Gather all of the waitable entities from associated nodes and callback groups.
   RCLCPP_PUBLIC
   void
