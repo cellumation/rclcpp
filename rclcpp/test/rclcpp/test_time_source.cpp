@@ -822,3 +822,35 @@ TEST_F(TestTimeSource, clock_sleep_until_with_ros_time_basic) {
   auto until = now + rclcpp::Duration(0, 500);
   EXPECT_TRUE(clock->sleep_until(until));
 }
+
+
+TEST_F(TestTimeSource, wakeup_sleep_sim_time) {
+  node->set_parameter({"use_sim_time", true});
+  auto clock = std::make_shared<rclcpp::Clock>(RCL_STEADY_TIME);
+
+  std::atomic_bool thread_finished = false;
+
+  std::thread wait_thread = std::thread(
+    [&clock, &thread_finished]()
+    {
+      // make sure the thread starts sleeping late
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      clock->sleep_until(clock->now() + std::chrono::seconds(3));
+      thread_finished = true;
+    });
+
+  // notify the clock, that the sleep shall be interrupted
+  clock->cancel_sleep_or_wait();
+
+  auto start_time = std::chrono::steady_clock::now();
+  auto cur_time = start_time;
+  while (!thread_finished && start_time + std::chrono::seconds(1) > cur_time) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    cur_time = std::chrono::steady_clock::now();
+  }
+
+  wait_thread.join();
+
+  EXPECT_TRUE(thread_finished);
+  EXPECT_LT(cur_time, start_time + std::chrono::seconds(1));
+}

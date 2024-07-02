@@ -41,6 +41,9 @@
 #include "test_msgs/msg/empty.hpp"
 
 #include "./executor_types.hpp"
+#include "rosgraph_msgs/msg/clock.hpp"
+// #include "rclcpp/executors/cbg_executor.hpp"
+#include "test_msgs/srv/empty.hpp"
 
 using namespace std::chrono_literals;
 
@@ -85,8 +88,18 @@ public:
 template<typename T>
 class TestExecutorsStable : public TestExecutors<T> {};
 
+// TYPED_TEST_SUITE is deprecated as of gtest 1.9, use TYPED_TEST_SUITE when gtest dependency
+// is updated.
 TYPED_TEST_SUITE(TestExecutors, ExecutorTypes, ExecutorTypeNames);
 
+// StaticSingleThreadedExecutor is not included in these tests for now, due to:
+// https://github.com/ros2/rclcpp/issues/1219
+using StandardExecutors =
+  ::testing::Types<
+  rclcpp::executors::SingleThreadedExecutor,
+  rclcpp::executors::MultiThreadedExecutor,
+//   rclcpp::executors::CBGExecutor,
+  rclcpp::experimental::executors::EventsExecutor>;
 TYPED_TEST_SUITE(TestExecutorsStable, StandardExecutors, ExecutorTypeNames);
 
 // Make sure that executors detach from nodes when destructing
@@ -725,6 +738,148 @@ TYPED_TEST(TestExecutors, testSpinUntilFutureCompleteInterrupted)
   // Force interruption
   rclcpp::shutdown();
 
+  RCUTILS_LOG_INFO("Test shutdown complete");
+
+
+  // Give it time to exit
+  auto start = std::chrono::steady_clock::now();
+  while (!spin_exited && (std::chrono::steady_clock::now() - start) < 1s) {
+    std::this_thread::sleep_for(1ms);
+  }
+
+  RCUTILS_LOG_INFO("before join of spin thread");
+
+  EXPECT_TRUE(spin_exited);
+  spinner.join();
+}
+
+// Check if services work as expected
+TYPED_TEST(TestExecutors, testService)
+{
+  using ExecutorType = TypeParam;
+  // rmw_connextdds doesn't support events-executor
+  if (
+    std::is_same<ExecutorType, rclcpp::experimental::executors::EventsExecutor>() &&
+    std::string(rmw_get_implementation_identifier()).find("rmw_connextdds") == 0)
+  {
+    GTEST_SKIP();
+  }
+
+  ExecutorType executor;
+  executor.add_node(this->node);
+
+  bool spin_exited = false;
+
+  rclcpp::Node::SharedPtr node = this->node;
+
+  const std::string service_name("/test/test_service");
+
+  using Service = test_msgs::srv::Empty;
+
+  bool gotCallback = false;
+
+  auto service_cb = [&gotCallback](const std::shared_ptr<Service::Request>/*request*/,
+      std::shared_ptr<Service::Response>/*response*/)
+    {
+      gotCallback = true;
+    };
+
+  auto service = node->create_service<Service>(service_name, service_cb, rclcpp::ServicesQoS());
+
+  // Long timeout
+  std::thread spinner([&spin_exited, &executor]() {
+      executor.spin();
+      spin_exited = true;
+    });
+
+  std::this_thread::sleep_for(1ms);
+
+  const std::shared_ptr<Service::Request> req = std::make_shared<Service::Request>();
+
+  auto client = node->create_client<Service>(service_name);
+
+
+  EXPECT_TRUE(client->wait_for_service(30ms));
+
+  auto handle = client->async_send_request(req);
+
+  auto retCode = handle.wait_for(500ms);
+  EXPECT_EQ(retCode, std::future_status::ready);
+
+  EXPECT_TRUE(gotCallback);
+
+  // Force interruption
+  rclcpp::shutdown();
+
+  // Give it time to exit
+  auto start = std::chrono::steady_clock::now();
+  while (!spin_exited && (std::chrono::steady_clock::now() - start) < 1s) {
+    std::this_thread::sleep_for(1ms);
+  }
+
+  EXPECT_TRUE(spin_exited);
+  spinner.join();
+}
+
+//test if objects work that were added after spinning started
+TYPED_TEST(TestExecutors, addAfterSpin)
+{
+  using ExecutorType = TypeParam;
+  // rmw_connextdds doesn't support events-executor
+  if (
+    std::is_same<ExecutorType, rclcpp::experimental::executors::EventsExecutor>() &&
+    std::string(rmw_get_implementation_identifier()).find("rmw_connextdds") == 0)
+  {
+    GTEST_SKIP();
+  }
+
+  ExecutorType executor;
+  executor.add_node(this->node);
+
+  bool spin_exited = false;
+
+
+  // Long timeout
+  std::thread spinner([&spin_exited, &executor]() {
+      executor.spin();
+      spin_exited = true;
+    });
+
+  std::this_thread::sleep_for(10ms);
+
+  rclcpp::Node::SharedPtr node = this->node;
+
+  const std::string service_name("/test/test_service");
+
+  using Service = test_msgs::srv::Empty;
+
+  bool gotCallback = false;
+
+  auto service_cb = [&gotCallback](const std::shared_ptr<Service::Request>/*request*/,
+      std::shared_ptr<Service::Response>/*response*/)
+    {
+      gotCallback = true;
+    };
+
+  auto service = node->create_service<Service>(service_name, service_cb, rclcpp::ServicesQoS());
+
+  const std::shared_ptr<Service::Request> req = std::make_shared<Service::Request>();
+
+  auto client = node->create_client<Service>(service_name);
+
+
+  EXPECT_TRUE(client->wait_for_service(30ms));
+
+  auto handle = client->async_send_request(req);
+
+  auto retCode = handle.wait_for(500ms);
+  EXPECT_EQ(retCode, std::future_status::ready);
+
+  EXPECT_TRUE(gotCallback);
+
+  // Force interruption
+  rclcpp::shutdown();
+
   // Give it time to exit
   auto start = std::chrono::steady_clock::now();
   while (!spin_exited && (std::chrono::steady_clock::now() - start) < 1s) {
@@ -1029,3 +1184,286 @@ TYPED_TEST(TestBusyWaiting, test_spin)
   // this should get the initial trigger, and the follow up from in the callback
   ASSERT_EQ(this->waitable->get_count(), 2u);
 }
+
+
+
+template<typename T>
+class TestIntraprocessExecutors : public ::testing::Test
+{
+public:
+  static void SetUpTestCase()
+  {
+    rclcpp::init(0, nullptr);
+  }
+
+  static void TearDownTestCase()
+  {
+    rclcpp::shutdown();
+  }
+
+  void SetUp()
+  {
+    const auto test_info = ::testing::UnitTest::GetInstance()->current_test_info();
+    std::stringstream test_name;
+    test_name << test_info->test_case_name() << "_" << test_info->name();
+    node = std::make_shared<rclcpp::Node>("node", test_name.str());
+
+    callback_count = 0u;
+
+    const std::string topic_name = std::string("topic_") + test_name.str();
+
+    rclcpp::PublisherOptions po;
+    po.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+    publisher = node->create_publisher<test_msgs::msg::Empty>(topic_name, rclcpp::QoS(1), po);
+
+    auto callback = [this](test_msgs::msg::Empty::ConstSharedPtr) {
+        this->callback_count.fetch_add(1u);
+      };
+
+    rclcpp::SubscriptionOptions so;
+    so.use_intra_process_comm = rclcpp::IntraProcessSetting::Enable;
+    subscription =
+      node->create_subscription<test_msgs::msg::Empty>(
+      topic_name, rclcpp::QoS(kNumMessages), std::move(callback), so);
+  }
+
+  void TearDown()
+  {
+    publisher.reset();
+    subscription.reset();
+    node.reset();
+  }
+
+  const size_t kNumMessages = 100;
+
+  rclcpp::Node::SharedPtr node;
+  rclcpp::Publisher<test_msgs::msg::Empty>::SharedPtr publisher;
+  rclcpp::Subscription<test_msgs::msg::Empty>::SharedPtr subscription;
+  std::atomic_size_t callback_count;
+};
+
+TYPED_TEST_SUITE(TestIntraprocessExecutors, ExecutorTypes, ExecutorTypeNames);
+
+TYPED_TEST(TestIntraprocessExecutors, testIntraprocessRetrigger) {
+  // This tests that executors will continue to service intraprocess subscriptions in the case
+  // that publishers aren't continuing to publish.
+  // This was previously broken in that intraprocess guard conditions were only triggered on
+  // publish and the test was added to prevent future regressions.
+  static constexpr size_t kNumMessages = 100;
+
+  using ExecutorType = TypeParam;
+  ExecutorType executor;
+  executor.add_node(this->node);
+
+  RCUTILS_LOG_ERROR_NAMED("rclcpp", "Before publish");
+
+  EXPECT_EQ(0u, this->callback_count.load());
+  this->publisher->publish(test_msgs::msg::Empty());
+
+  RCUTILS_LOG_ERROR_NAMED("rclcpp", "After publish");
+
+  // Wait for up to 5 seconds for the first message to come available.
+  const std::chrono::milliseconds sleep_per_loop(10);
+  int loops = 0;
+  while (1u != this->callback_count.load() && loops < 500) {
+    rclcpp::sleep_for(sleep_per_loop);
+    executor.spin_some();
+    loops++;
+  }
+  EXPECT_EQ(1u, this->callback_count.load());
+
+  // reset counter
+  this->callback_count.store(0u);
+
+  for (size_t ii = 0; ii < kNumMessages; ++ii) {
+    this->publisher->publish(test_msgs::msg::Empty());
+  }
+
+  // Fire a timer every 10ms up to 5 seconds waiting for subscriptions to be read.
+  loops = 0;
+  auto timer = this->node->create_wall_timer(
+    std::chrono::milliseconds(10), [this, &executor, &loops]() {
+      loops++;
+      if (kNumMessages == this->callback_count.load() || loops == 500) {
+        executor.cancel();
+      }
+    });
+  executor.spin();
+  EXPECT_EQ(kNumMessages, this->callback_count.load());
+}
+
+class TimerNode : public rclcpp::Node
+{
+public:
+  explicit TimerNode(std::string subname)
+  : Node("timer_node", subname)
+  {
+    timer1_ = rclcpp::create_timer(
+      this->get_node_base_interface(), get_node_timers_interface(),
+      get_clock(), 1ms,
+      std::bind(&TimerNode::Timer1Callback, this));
+
+    timer2_ =
+      rclcpp::create_timer(
+      this->get_node_base_interface(), get_node_timers_interface(),
+      get_clock(), 1ms,
+      std::bind(&TimerNode::Timer2Callback, this));
+  }
+
+  int GetTimer1Cnt() {return cnt1_;}
+  int GetTimer2Cnt() {return cnt2_;}
+
+  void ResetTimer1()
+  {
+    timer1_->reset();
+  }
+
+  void ResetTimer2()
+  {
+    timer2_->reset();
+  }
+
+  void CancelTimer1()
+  {
+    RCLCPP_DEBUG(this->get_logger(), "Timer 1 cancelling!");
+    timer1_->cancel();
+  }
+
+  void CancelTimer2()
+  {
+    RCLCPP_DEBUG(this->get_logger(), "Timer 2 cancelling!");
+    timer2_->cancel();
+  }
+
+private:
+  void Timer1Callback()
+  {
+    RCLCPP_DEBUG(this->get_logger(), "Timer 1!");
+    cnt1_++;
+  }
+
+  void Timer2Callback()
+  {
+    RCLCPP_DEBUG(this->get_logger(), "Timer 2!");
+    cnt2_++;
+  }
+
+  rclcpp::TimerBase::SharedPtr timer1_;
+  rclcpp::TimerBase::SharedPtr timer2_;
+  int cnt1_ = 0;
+  int cnt2_ = 0;
+};
+
+// Sets up a separate thread to publish /clock messages.
+// Clock rate relative to real clock is controlled by realtime_update_rate.
+// This is set conservatively slow to ensure unit tests are reliable on Windows
+// environments, where timing performance is subpar.
+//
+// Use `sleep_for` in tests to advance the clock. Clock should run and be published
+// in separate thread continuously to ensure correct behavior in node under test.
+class ClockPublisher : public rclcpp::Node
+{
+public:
+  explicit ClockPublisher(float simulated_clock_step = .001f, float realtime_update_rate = 0.25f)
+  : Node("clock_publisher"),
+    ros_update_duration_(0, 0),
+    realtime_clock_step_(0, 0),
+    rostime_(0, 0)
+  {
+    clock_publisher_ = this->create_publisher<rosgraph_msgs::msg::Clock>("clock", 10);
+    realtime_clock_step_ =
+      rclcpp::Duration::from_seconds(simulated_clock_step / realtime_update_rate);
+    ros_update_duration_ = rclcpp::Duration::from_seconds(simulated_clock_step);
+
+    timer_thread_ = std::thread(&ClockPublisher::RunTimer, this);
+  }
+
+  ~ClockPublisher()
+  {
+    running_ = false;
+    if (timer_thread_.joinable()) {
+      timer_thread_.join();
+    }
+  }
+
+  void sleep_for(rclcpp::Duration duration)
+  {
+    rclcpp::Time start_time(0, 0, RCL_ROS_TIME);
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      start_time = rostime_;
+    }
+    rclcpp::Time current_time = start_time;
+
+    while (true) {
+      {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        current_time = rostime_;
+      }
+      if ((current_time - start_time) >= duration) {
+        return;
+      }
+      std::this_thread::sleep_for(realtime_clock_step_.to_chrono<std::chrono::milliseconds>());
+      rostime_ += ros_update_duration_;
+    }
+  }
+
+private:
+  void RunTimer()
+  {
+    while (running_) {
+      PublishClock();
+      std::this_thread::sleep_for(realtime_clock_step_.to_chrono<std::chrono::milliseconds>());
+    }
+  }
+
+  void PublishClock()
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    auto message = rosgraph_msgs::msg::Clock();
+    message.clock = rostime_;
+    clock_publisher_->publish(message);
+  }
+
+  rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_publisher_;
+
+  rclcpp::Duration ros_update_duration_;
+  rclcpp::Duration realtime_clock_step_;
+  // Rostime must be guarded by a mutex, since accessible in running thread
+  // as well as sleep_for
+  rclcpp::Time rostime_;
+  std::mutex mutex_;
+  std::thread timer_thread_;
+  std::atomic<bool> running_ = true;
+};
+
+
+// template<typename T>
+// class TestTimerCancelBehavior : public ::testing::Test
+// {
+// public:
+//   static void SetUpTestCase()
+//   {
+//     rclcpp::init(0, nullptr);
+//   }
+//
+//   static void TearDownTestCase()
+//   {
+//     publisher.reset();
+//     subscription.reset();
+//     waitable.reset();
+//     node.reset();
+//     callback_group.reset();
+//     executor.reset();
+//   }
+//
+//   const size_t kNumMessages = 100;
+//
+//   rclcpp::Node::SharedPtr node;
+//   rclcpp::Publisher<test_msgs::msg::Empty>::SharedPtr publisher;
+//   rclcpp::Subscription<test_msgs::msg::Empty>::SharedPtr subscription;
+//   rclcpp::Waitable::SharedPtr waitable;
+//   rclcpp::CallbackGroup::SharedPtr callback_group;
+//   std::shared_ptr<T> executor;
+//   std::atomic_size_t callback_count;
+// };
