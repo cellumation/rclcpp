@@ -31,6 +31,8 @@
 #include "rclcpp/exceptions.hpp"
 #include "rclcpp_action/server.hpp"
 
+#include <inttypes.h>
+
 using rclcpp_action::ServerBase;
 using rclcpp_action::GoalUUID;
 
@@ -79,6 +81,151 @@ public:
   )
   : clock_(clock), logger_(logger)
   {
+  }
+
+  std::recursive_mutex expire_thread_reentrant_mutex_;
+  std::thread expire_thread;
+
+  std::function<void(size_t, int)> expire_ready_callback;
+  // must be a class member, so keep it in scope
+  std::function<void(size_t)> expire_reset_callback;
+
+  rclcpp::ClockConditionalVariable::SharedPtr expire_cv;
+  bool expire_time_changed = false;
+
+  void stop_expire_thread()
+  {
+    std::lock_guard<std::recursive_mutex> lock(expire_thread_reentrant_mutex_);
+    expire_ready_callback = std::function<void(size_t, int)>();
+    if(expire_cv)
+    {
+      {
+        std::lock_guard<std::mutex> l(expire_cv->mutex());
+        expire_time_changed = true;
+      }
+      expire_cv->notify_one();
+    }
+    expire_thread.join();
+    expire_reset_callback = std::function<void(size_t)>();
+    expire_cv.reset();
+  }
+
+  void start_expire_thread(std::function<void(size_t, int)> expire_ready_cb)
+  {
+    {
+      std::lock_guard<std::recursive_mutex> lock(expire_thread_reentrant_mutex_);
+      if(expire_cv)
+      {
+        return;
+      }
+
+      expire_ready_callback = expire_ready_cb;
+      expire_cv = std::make_shared<rclcpp::ClockConditionalVariable>(clock_);
+    }
+
+    RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "starting expire thread");
+
+    rclcpp::Context::SharedPtr context = rclcpp::contexts::get_global_default_context();
+    std::shared_ptr<rcl_context_t> rcl_context = context->get_rcl_context();
+
+    rcl_wait_set_t wait_set = rcl_get_zero_initialized_wait_set();
+    rcl_ret_t ret =
+    rcl_wait_set_init(&wait_set, num_subscriptions_, num_guard_conditions_, num_timers_, num_clients_, num_services_, 0, rcl_context.get(), rcl_get_default_allocator());
+    if(ret != RCL_RET_OK)
+    {
+      throw std::runtime_error("Internal error starting timer thread");
+    }
+
+    ret = rcl_action_wait_set_add_action_server(
+    &wait_set, action_server_.get(), NULL);
+    if (RCL_RET_OK != ret) {
+      rclcpp::exceptions::throw_from_rcl_error(ret, "ServerBase::add_to_wait_set() failed");
+    }
+
+    // extract the timer from the wait set
+    const rcl_timer_t *expire_timer =  wait_set.timers[0];
+
+    //don't need the wait set any more
+    ret = rcl_wait_set_fini(&wait_set);
+
+    expire_reset_callback = [this] (size_t /*reset_calls*/)
+    {
+      {
+        std::lock_guard<std::mutex> l(expire_cv->mutex());
+        expire_time_changed = true;
+      }
+      expire_cv->notify_one();
+      RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer was reset");
+    };
+
+    rcl_event_callback_t rcl_reset_callback = rclcpp::detail::cpp_callback_trampoline<
+      decltype(expire_reset_callback), const void *, size_t>;
+
+    ret = rcl_timer_set_on_reset_callback(expire_timer, rcl_reset_callback, static_cast<const void *>(&expire_reset_callback));
+    if (ret != RCL_RET_OK) {
+      rclcpp::exceptions::throw_from_rcl_error(ret, "Failed to set timer on reset callback");
+    }
+
+    expire_thread = std::thread([this, expire_timer]() {
+
+      std::function<void(size_t, int)> cb_copy = expire_ready_callback;
+
+      rcl_clock_type_t clock_type = clock_->get_clock_type();
+
+
+      while(true)
+      {
+        {
+          std::lock_guard<std::recursive_mutex> lock(expire_thread_reentrant_mutex_);
+          if(!expire_ready_callback)
+          {
+            break;
+          }
+        }
+
+        {
+          std::unique_lock<std::mutex> l(expire_cv->mutex());
+
+          // reset to false, we are handling the time change right now
+          expire_time_changed = false;
+          int64_t time_until_call = 0;
+
+          auto ret2 = rcl_timer_get_time_until_next_call(expire_timer, &time_until_call);
+          if (ret2 == RCL_RET_TIMER_CANCELED) {
+//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer canceleled, doing long wait");
+            rclcpp::Time endless(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::hours(100)).count(), clock_type);
+            expire_cv->wait_until(l, endless, [this] () { return expire_time_changed;});
+            continue;
+          }
+
+          if(time_until_call > 0)
+          {
+//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer not ready yet, doing short wait");
+            rclcpp::Time next_wakeup(clock_->now().nanoseconds() + time_until_call, clock_type);
+            expire_cv->wait_until(l, next_wakeup, [this] () { return expire_time_changed;});
+          }
+        }
+
+        bool is_ready = false;
+        if(rcl_timer_is_ready(expire_timer, &is_ready) == RCL_RET_OK && is_ready)
+        {
+          // we need to cancel the timer here, to avoid a endless loop
+          // in case a new goal expires, the timer will be reset.
+          auto ret2 = rcl_timer_cancel(const_cast<rcl_timer_t *>(expire_timer));
+          if( ret2 != RCL_RET_OK)
+          {
+            rclcpp::exceptions::throw_from_rcl_error(ret2, "Failed to cancel timer");
+          }
+
+          std::lock_guard<std::recursive_mutex> lock(expire_thread_reentrant_mutex_);
+          if(expire_ready_callback)
+          {
+            expire_ready_callback(1, static_cast<int>(ServerBase::EntityType::Expired));
+//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer triggered");
+          }
+        }
+      }
+    });
   }
 
   // Lock for action_server_
@@ -785,6 +932,8 @@ ServerBase::set_on_ready_callback(std::function<void(size_t, int)> callback)
             "is not callable.");
   }
 
+  pimpl_->start_expire_thread(callback);
+
   set_callback_to_entity(EntityType::GoalService, callback);
   set_callback_to_entity(EntityType::ResultService, callback);
   set_callback_to_entity(EntityType::CancelService, callback);
@@ -905,6 +1054,7 @@ ServerBase::clear_on_ready_callback()
     set_on_ready_callback(EntityType::GoalService, nullptr, nullptr);
     set_on_ready_callback(EntityType::ResultService, nullptr, nullptr);
     set_on_ready_callback(EntityType::CancelService, nullptr, nullptr);
+    pimpl_->stop_expire_thread();
     on_ready_callback_set_ = false;
   }
 
