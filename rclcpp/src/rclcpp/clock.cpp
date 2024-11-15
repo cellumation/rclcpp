@@ -23,7 +23,7 @@
 
 #include "rcpputils/scope_exit.hpp"
 #include "rcutils/logging_macros.h"
-
+#include <inttypes.h>
 namespace rclcpp
 {
 
@@ -118,11 +118,12 @@ Clock::sleep_until(
     });
   // No longer need the shutdown callback when this function exits
   auto callback_remover = rcpputils::scope_exit(
-    [context, &shutdown_cb_handle]() {
+    [&context, &shutdown_cb_handle]() {
       context->remove_on_shutdown_callback(shutdown_cb_handle);
     });
 
   if (this_clock_type == RCL_STEADY_TIME) {
+//     RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_STEADY_TIME");
     // Synchronize because RCL steady clock epoch might differ from chrono::steady_clock epoch
     const Time rcl_entry = now();
     const std::chrono::steady_clock::time_point chrono_entry = std::chrono::steady_clock::now();
@@ -137,6 +138,7 @@ Clock::sleep_until(
     }
     impl_->stop_sleeping_ = false;
   } else if (this_clock_type == RCL_SYSTEM_TIME) {
+//     RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_SYSTEM_TIME");
     auto system_time = std::chrono::system_clock::time_point(
       // Cast because system clock resolution is too big for nanoseconds on some systems
       std::chrono::duration_cast<std::chrono::system_clock::duration>(
@@ -149,6 +151,8 @@ Clock::sleep_until(
     }
     impl_->stop_sleeping_ = false;
   } else if (this_clock_type == RCL_ROS_TIME) {
+//       RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME");
+
     // Install jump handler for any amount of time change, for two purposes:
     // - if ROS time is active, check if time reached on each new clock sample
     // - Trigger via on_clock_change to detect if time source changes, to invalidate sleep
@@ -169,11 +173,14 @@ Clock::sleep_until(
       threshold);
 
     if (!ros_time_is_active()) {
+//         RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME and sim time is not active");
+
       auto system_time = std::chrono::system_clock::time_point(
         // Cast because system clock resolution is too big for nanoseconds on some systems
         std::chrono::duration_cast<std::chrono::system_clock::duration>(
           std::chrono::nanoseconds(until.nanoseconds())));
 
+//       RCUTILS_LOG_ERROR_NAMED("rclcpp::Clock", " wakeup time %+" PRId64, system_time.time_since_epoch().count());
       // loop over spurious wakeups but notice shutdown, stop of sleep or time source change
       std::unique_lock lock(impl_->wait_mutex_);
       while (now() < until && !impl_->stop_sleeping_ && !impl_->shutdown_ && context->is_valid() &&
@@ -183,6 +190,8 @@ Clock::sleep_until(
       }
       impl_->stop_sleeping_ = false;
     } else {
+//         RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME and sim time is active");
+
       // RCL_ROS_TIME with ros_time_is_active.
       // Just wait without "until" because installed
       // jump callbacks wake the cv on every new sample.

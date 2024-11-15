@@ -72,6 +72,177 @@ struct ServerBaseData
   : data(std::move(data_in)) {}
 };
 
+class ClockThing
+{
+private:
+  rclcpp::Clock::SharedPtr clock_;
+
+  bool stop_sleeping_ = false;
+  bool shutdown_ = false;
+  bool time_source_changed_ = false;
+  std::condition_variable cv_;
+  std::mutex wait_mutex_;
+  rclcpp::OnShutdownCallbackHandle shutdown_cb_handle_;
+  rclcpp::Context::SharedPtr context_;
+
+  std::function<void (const rcl_time_jump_t &)> post_time_jump_callback;
+
+public:
+  RCLCPP_SMART_PTR_DEFINITIONS(ClockThing)
+
+  ClockThing(rclcpp::Clock::SharedPtr &clock, rclcpp::Context::SharedPtr context = rclcpp::contexts::get_global_default_context()) :
+    clock_(clock),
+    context_(context)
+  {
+    if (!context_ || !context_->is_valid()) {
+      throw std::runtime_error("context cannot be slept with because it's invalid");
+    }
+      // Wake this thread if the context is shutdown
+    shutdown_cb_handle_ = context_->add_on_shutdown_callback(
+    [this]() {
+      {
+        std::unique_lock lock(wait_mutex_);
+        shutdown_ = true;
+      }
+      cv_.notify_one();
+    });
+
+    post_time_jump_callback = [this] (const rcl_time_jump_t & jump) {
+        if (jump.clock_change != RCL_ROS_TIME_NO_CHANGE) {
+          std::lock_guard<std::mutex> lk(wait_mutex_);
+          time_source_changed_ = true;
+        }
+        cv_.notify_one();
+    };
+  };
+
+  ~ClockThing()
+  {
+    context_->remove_on_shutdown_callback(shutdown_cb_handle_);
+  }
+
+  bool
+  sleep_for(rclcpp::Duration rel_time)
+  {
+    return sleep_until(clock_->now() + rel_time);
+  }
+
+  bool sleep_until(rclcpp::Time until)
+  {
+    const auto this_clock_type = clock_->get_clock_type();
+    if (until.get_clock_type() != this_clock_type) {
+      throw std::runtime_error("until's clock type does not match this clock's type");
+    }
+
+    rclcpp::Time cur_time = clock_->now();
+
+    if (this_clock_type == RCL_STEADY_TIME) {
+  //     RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_STEADY_TIME");
+      // Synchronize because RCL steady clock epoch might differ from chrono::steady_clock epoch
+      const rclcpp::Time rcl_entry = cur_time;
+      const std::chrono::steady_clock::time_point chrono_entry = std::chrono::steady_clock::now();
+      const rclcpp::Duration delta_t = until - rcl_entry;
+      const std::chrono::steady_clock::time_point chrono_until =
+        chrono_entry + std::chrono::nanoseconds(delta_t.nanoseconds());
+
+      // loop over spurious wakeups but notice shutdown or stop of sleep
+      std::unique_lock lock(wait_mutex_);
+      while (cur_time < until && !stop_sleeping_ && !shutdown_ && context_->is_valid()) {
+        cv_.wait_until(lock, chrono_until);
+        cur_time = clock_->now();
+      }
+      stop_sleeping_ = false;
+    } else if (this_clock_type == RCL_SYSTEM_TIME) {
+  //     RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_SYSTEM_TIME");
+      auto system_time = std::chrono::system_clock::time_point(
+        // Cast because system clock resolution is too big for nanoseconds on some systems
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(
+          std::chrono::nanoseconds(until.nanoseconds())));
+
+      // loop over spurious wakeups but notice shutdown or stop of sleep
+      std::unique_lock lock(wait_mutex_);
+      while (cur_time < until && !stop_sleeping_ && !shutdown_ && context_->is_valid()) {
+        cv_.wait_until(lock, system_time);
+        cur_time = clock_->now();
+      }
+      stop_sleeping_ = false;
+    } else if (this_clock_type == RCL_ROS_TIME) {
+  //       RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME");
+
+      // Install jump handler for any amount of time change, for two purposes:
+      // - if ROS time is active, check if time reached on each new clock sample
+      // - Trigger via on_clock_change to detect if time source changes, to invalidate sleep
+      rcl_jump_threshold_t threshold;
+      threshold.on_clock_change = true;
+      // 0 is disable, so -1 and 1 are smallest possible time changes
+      threshold.min_backward.nanoseconds = -1;
+      threshold.min_forward.nanoseconds = 1;
+
+      time_source_changed_ = false;
+
+      auto clock_handler = clock_->create_jump_callback(
+        nullptr,
+        post_time_jump_callback,
+        threshold);
+
+      if (!clock_->ros_time_is_active()) {
+  //         RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME and sim time is not active");
+
+        auto system_time = std::chrono::system_clock::time_point(
+          // Cast because system clock resolution is too big for nanoseconds on some systems
+          std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::nanoseconds(until.nanoseconds())));
+
+  //       RCUTILS_LOG_ERROR_NAMED("rclcpp::Clock", " wakeup time %+" PRId64, system_time.time_since_epoch().count());
+        // loop over spurious wakeups but notice shutdown, stop of sleep or time source change
+        std::unique_lock lock(wait_mutex_);
+        while (clock_->now() < until && !stop_sleeping_ && !shutdown_ && context_->is_valid() &&
+          !time_source_changed_)
+        {
+          cv_.wait_until(lock, system_time);
+        }
+        stop_sleeping_ = false;
+      } else {
+  //         RCUTILS_LOG_INFO_NAMED("rclcpp::Clock", "Time source is RCL_ROS_TIME and sim time is active");
+
+        // RCL_ROS_TIME with ros_time_is_active.
+        // Just wait without "until" because installed
+        // jump callbacks wake the cv on every new sample.
+        std::unique_lock lock(wait_mutex_);
+        while (clock_->now() < until && !stop_sleeping_ && !shutdown_ && context_->is_valid() &&
+          !time_source_changed_)
+        {
+          cv_.wait(lock);
+        }
+        stop_sleeping_ = false;
+      }
+    }
+
+    if (!context_->is_valid() || time_source_changed_) {
+      return false;
+    }
+
+    return clock_->now() >= until;
+  }
+
+  /**
+   * Cancels an ongoing or future sleep operation of one thread.
+   *
+   * This function can be used by one thread, to wakeup another thread that is
+   * blocked using any of the sleep_ or wait_ methods of this class.
+   */
+  RCLCPP_PUBLIC
+  void
+  cancel_sleep_or_wait()
+  {
+    {
+      std::unique_lock lock(wait_mutex_);
+      stop_sleeping_ = true;
+    }
+    cv_.notify_one();
+  }
+};
+
 class ServerBaseImpl
 {
 public:
@@ -89,7 +260,7 @@ public:
   std::function<void(size_t, int)> expire_ready_callback;
   // must be a class member, so keep it in scope
   std::function<void(size_t)> expire_reset_callback;
-  rclcpp::Clock::SharedPtr expire_clock;
+  ClockThing::SharedPtr expire_clock;
 
   void stop_expire_thread()
   {
@@ -141,15 +312,15 @@ public:
     //don't need the wait set any more
     ret = rcl_wait_set_fini(&wait_set);
 
-    rcl_clock_t expire_clock_rcl;
-    rcl_clock_t *expire_clock_rcl_ptr = &expire_clock_rcl;
+//     rcl_clock_t expire_clock_rcl;
+//     rcl_clock_t *expire_clock_rcl_ptr = &expire_clock_rcl;
+//
+//     ret = rcl_timer_clock(expire_timer, &expire_clock_rcl_ptr);
+//     if (RCL_RET_OK != ret) {
+//       rclcpp::exceptions::throw_from_rcl_error(ret, "Failed to gather expire clock failed");
+//     }
 
-    ret = rcl_timer_clock(expire_timer, &expire_clock_rcl_ptr);
-    if (RCL_RET_OK != ret) {
-      rclcpp::exceptions::throw_from_rcl_error(ret, "Failed to gather expire clock failed");
-    }
-
-    expire_clock = std::make_shared<rclcpp::Clock>(expire_clock_rcl_ptr->type);
+    expire_clock = std::make_shared<ClockThing>(clock_);
 
     expire_reset_callback = [this] (size_t /*reset_calls*/)
     {
@@ -182,8 +353,8 @@ public:
         int64_t time_until_call = 0;
         bool canceled = false;
 
-        auto ret = rcl_timer_get_time_until_next_call(expire_timer, &time_until_call);
-        if (ret == RCL_RET_TIMER_CANCELED) {
+        auto ret2 = rcl_timer_get_time_until_next_call(expire_timer, &time_until_call);
+        if (ret2 == RCL_RET_TIMER_CANCELED) {
           canceled = true;
         }
 
@@ -192,20 +363,20 @@ public:
         if(canceled)
         {
           // no inactive goal, sleep for a long time
-//           RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer is canceled, sleeping long time");
+          RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer is canceled, sleeping long time");
           expire_clock->sleep_for(std::chrono::hours(100));
         }
         else
         {
           if(time_until_call > 0)
           {
-//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer is active, sleeping short time %+" PRId64, time_until_call);
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "expire timer is active, sleeping short time %+" PRId64, time_until_call);
             bool sleep_worked = expire_clock->sleep_for(std::chrono::nanoseconds(time_until_call));
-//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), ("sleep done " + std::to_string(sleep_worked)).c_str());
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), ("sleep done " + std::to_string(sleep_worked)).c_str());
           }
           else
           {
-//             RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "Timer is ready, skipping sleep");
+            RCLCPP_INFO(rclcpp::get_logger("rclcpp_action"), "Timer is ready, skipping sleep");
           }
         }
 
@@ -218,10 +389,10 @@ public:
 
             // we need to cancel the timer here, to avoid a endless loop
             // in case a new goal expires, the timer will be reset.
-            ret = rcl_timer_cancel(const_cast<rcl_timer_t *>(expire_timer));
-            if( ret != RCL_RET_OK)
+            ret2 = rcl_timer_cancel(const_cast<rcl_timer_t *>(expire_timer));
+            if( ret2 != RCL_RET_OK)
             {
-              rclcpp::exceptions::throw_from_rcl_error(ret, "Failed to cancel timer");
+              rclcpp::exceptions::throw_from_rcl_error(ret2, "Failed to cancel timer");
             }
 
             triggered = true;
