@@ -918,9 +918,6 @@ TYPED_TEST(TestExecutors, dropSomeTimer)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   // delete timer 2. Note, the executor uses an unordered map internally, to order
@@ -938,9 +935,6 @@ TYPED_TEST(TestExecutors, dropSomeTimer)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   ASSERT_TRUE(timer1_works || timer2_works);
@@ -975,9 +969,6 @@ TYPED_TEST(TestExecutors, dropSomeNodeWithTimer)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   // delete node 1.
@@ -991,9 +982,6 @@ TYPED_TEST(TestExecutors, dropSomeNodeWithTimer)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   ASSERT_TRUE(timer2_works);
@@ -1010,11 +998,11 @@ TYPED_TEST(TestExecutors, dropSomeSubscription)
   bool sub2_works = false;
 
   auto sub1 = node->create_subscription<test_msgs::msg::Empty>("/test_drop", 10,
-      [&sub1_works](const test_msgs::msg::Empty & msg) {
+      [&sub1_works](const test_msgs::msg::Empty &) {
         sub1_works = true;
   });
   auto sub2 = node->create_subscription<test_msgs::msg::Empty>("/test_drop", 10,
-      [&sub2_works](const test_msgs::msg::Empty & msg) {
+      [&sub2_works](const test_msgs::msg::Empty &) {
         sub2_works = true;
   });
 
@@ -1032,9 +1020,6 @@ TYPED_TEST(TestExecutors, dropSomeSubscription)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   // delete subscription 2. Note, the executor uses an unordered map internally, to order
@@ -1054,9 +1039,6 @@ TYPED_TEST(TestExecutors, dropSomeSubscription)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   ASSERT_TRUE(sub1_works || sub2_works);
@@ -1075,11 +1057,11 @@ TYPED_TEST(TestExecutors, dropSomeNodesWithSubscription)
   bool sub2_works = false;
 
   auto sub1 = node1->create_subscription<test_msgs::msg::Empty>("/test_drop", 10,
-      [&sub1_works](const test_msgs::msg::Empty & msg) {
+      [&sub1_works](const test_msgs::msg::Empty &) {
         sub1_works = true;
   });
   auto sub2 = node2->create_subscription<test_msgs::msg::Empty>("/test_drop", 10,
-      [&sub2_works](const test_msgs::msg::Empty & msg) {
+      [&sub2_works](const test_msgs::msg::Empty &) {
         sub2_works = true;
   });
 
@@ -1099,9 +1081,6 @@ TYPED_TEST(TestExecutors, dropSomeNodesWithSubscription)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   // delete node 2.
@@ -1117,9 +1096,6 @@ TYPED_TEST(TestExecutors, dropSomeNodesWithSubscription)
 
     const auto cur_time = std::chrono::steady_clock::now();
     ASSERT_LT(cur_time, max_end_time);
-    if(cur_time > max_end_time) {
-      return;
-    }
   }
 
   ASSERT_TRUE(sub1_works);
