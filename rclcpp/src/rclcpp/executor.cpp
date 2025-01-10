@@ -373,6 +373,12 @@ Executor::spin_some_impl(std::chrono::nanoseconds max_duration, bool exhaustive)
   wait_for_work(std::chrono::milliseconds(0));
   bool just_waited = true;
 
+  if(entities_need_rebuild_) {
+    // if the last wait triggered a collection rebuild, we need to call wait_for_work
+    // once more, order do a collection rebuild and collect events from the just added entities
+    just_waited = false;
+  }
+
   // The logic of this while loop is as follows:
   //
   // - while not shutdown, and spinning (not canceled), and not max duration reached...
@@ -409,6 +415,12 @@ Executor::spin_some_impl(std::chrono::nanoseconds max_duration, bool exhaustive)
         // this only happens for spin_all; spin_some only waits at the start
         wait_for_work(std::chrono::milliseconds(0));
         just_waited = true;
+        if(entities_need_rebuild_) {
+          // if the last wait triggered a collection rebuild, we need to call
+          // wait_for_work once more, order do a collection rebuild and collect
+          // events from the just added entities
+          just_waited = false;
+        }
       } else {
         break;
       }
