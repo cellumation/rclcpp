@@ -68,6 +68,17 @@ void retyped_deallocate(void * untyped_pointer, void * untyped_allocator)
 }
 
 template<typename T, typename Alloc>
+void retyped_deallocate_with_size(void * untyped_pointer, size_t size, void * untyped_allocator)
+{
+  auto typed_allocator = static_cast<Alloc *>(untyped_allocator);
+  if (!typed_allocator) {
+    throw std::runtime_error("Received incorrect allocator type");
+  }
+  auto typed_ptr = static_cast<T *>(untyped_pointer);
+  std::allocator_traits<Alloc>::deallocate(*typed_allocator, typed_ptr, size);
+}
+
+template<typename T, typename Alloc>
 void * retyped_reallocate(void * untyped_pointer, size_t size, void * untyped_allocator)
 {
   auto typed_allocator = static_cast<Alloc *>(untyped_allocator);
@@ -92,6 +103,7 @@ rcl_allocator_t get_rcl_allocator(Alloc & allocator)
   rcl_allocator.allocate = &retyped_allocate<Alloc>;
   rcl_allocator.zero_allocate = &retyped_zero_allocate<Alloc>;
   rcl_allocator.deallocate = &retyped_deallocate<T, Alloc>;
+  rcl_allocator.deallocate_with_size = &retyped_deallocate_with_size<T, Alloc>;
   rcl_allocator.reallocate = &retyped_reallocate<T, Alloc>;
   rcl_allocator.state = &allocator;
 #else
